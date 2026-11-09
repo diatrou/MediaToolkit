@@ -811,6 +811,7 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
 
         $logoInputArgs = [System.Collections.Generic.List[string]]::new()
         $filterParts = [System.Collections.Generic.List[string]]::new()
+        $finalFilterParts = [System.Collections.Generic.List[string]]::new()
         $currentVideoInput = "0:v"
         
         $schedCount = $validSchedules.Count
@@ -876,13 +877,10 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
 				}
 			}
 
-			# --- ΠΡΟΣΩΡΙΝΗ ΔΟΚΙΜΗ ΓΙΑ ΤΟ PREVIEW ---
-			# Αν εκτελούμε προεπισκόπηση, ας μηδενίσουμε προσωρινά το fade για να δούμε αν εμφανίζεται το logo:
-			# (Μπορείς να βάλεις μια σημαία $isPreview/$true κατά το preview)
-			if ($script:IsRunningPreview) {
-				$fadeFilter = ""
-			}
-			# ----------------------------------------
+            $finalFadeFilter = $fadeFilter
+            if ($script:IsRunningPreview) {
+                $fadeFilter = ""
+            }
 
 			Write-Host "TEST FADE -> fadeInSec: $fadeInSec | startTimeSec: $startTimeSec | fadeFilter: $fadeFilter" -ForegroundColor Cyan
 
@@ -894,8 +892,10 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
 				$nextVideoInput = "v_logo_$i"
 			}
 
-			$filterPart = "[${fileIdx}:v]scale=${lWidth}:-1,format=yuva420p,colorchannelmixer=aa=$logoAlpha${fadeFilter}[$pipName];[$currentVideoInput][$pipName]overlay=x=$logoX`:y=$logoY`:enable='$enableExpr'[$nextVideoInput]"
-			$filterParts.Add($filterPart)
+            $filterPart = "[${fileIdx}:v]scale=${lWidth}:-1,format=yuva420p,colorchannelmixer=aa=$logoAlpha${fadeFilter}[$pipName];[$currentVideoInput][$pipName]overlay=x=$logoX`:y=$logoY`:enable='$enableExpr':shortest=1[$nextVideoInput]"
+            $finalFilterPart = "[${fileIdx}:v]scale=${lWidth}:-1,format=yuva420p,colorchannelmixer=aa=$logoAlpha${finalFadeFilter}[$pipName];[$currentVideoInput][$pipName]overlay=x=$logoX`:y=$logoY`:enable='$enableExpr':shortest=1[$nextVideoInput]"
+            $filterParts.Add($filterPart)
+            $finalFilterParts.Add($finalFilterPart)
 
 			$currentVideoInput = $nextVideoInput
         }
@@ -910,6 +910,8 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
             $filterParts.Add("[tb1]drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':textfile='$escapedEpPath':x=$textX`:y=$textY2`:fontsize=$fontSize2`:fontcolor=black[tb2]")
             $filterParts.Add("[tb2]format=yuva420p,fade=t=out:st=$fadeOutSec`:d=1:alpha=1[banner]")
             $filterParts.Add("[$currentVideoInput][banner]overlay=x=$bannerX`:y=$bannerY`:shortest=1[$bannerFinalInput]")
+            $finalFilterParts.Add("[tb2]format=yuva420p,fade=t=out:st=$fadeOutSec`:d=1:alpha=1[banner]")
+            $finalFilterParts.Add("[$currentVideoInput][banner]overlay=x=$bannerX`:y=$bannerY`:shortest=1[$bannerFinalInput]")
         }
 
         $filter = $filterParts -join ";"
@@ -1036,6 +1038,8 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
     }
 
     Write-Host "`n>>> Επεξεργασία σε εξέλιξη (Εφαρμογή Overlay)... Παρακαλώ περιμένετε." -ForegroundColor Cyan
+
+    $filter = $finalFilterParts -join ";"
     
     # --- ΔΙΟΡΘΩΣΗ ΧΡΟΝΙΣΜΟΥ LOGO SCHEDULE ---
     # Το Preview χρησιμοποιεί στατικό καρέ, άρα το φίλτρο του χρειάζεται
