@@ -1,0 +1,30 @@
+{
+  "bannerOpacity": "100",
+  "logoFadeOut": "00:00:05.000",
+  "logoDirPath": "D:\\Videos\\Ταινίες\\Marvel Cinematic Universe\\The Infinity Saga\\03 Phase Three\\Doctor Strange (2016 film)",
+  "ffprobePath": "C:\\Users\\Δημήτρης\\Downloads\\ffmpeg-2026-08-06-git-95c43d7df7-essentials_build\\bin\\ffprobe.exe",
+  "bannerWidth": "220",
+  "previewTime": "00:04.000",
+  "bannerHeight": "50",
+  "ffmpegPath": "C:\\Users\\Δημήτρης\\Downloads\\ffmpeg-2026-08-06-git-95c43d7df7-essentials_build\\bin\\ffmpeg.exe",
+  "logoPosition": "99:79",
+  "logoSchedules": [
+    {
+      "File": "D:\\Videos\\Ταινίες\\Marvel Cinematic Universe\\The Infinity Saga\\03 Phase Three\\Doctor Strange (2016 film)\\banner.jpg",
+      "FadeOut": "0",
+      "FadeIn": "0",
+      "Start": "00:01.000",
+      "Duration": "00:01.000"
+    },
+    {
+      "File": "D:\\Videos\\Ταινίες\\Marvel Cinematic Universe\\The Infinity Saga\\03 Phase Three\\Doctor Strange (2016 film)\\banner.jpg",
+      "FadeOut": "0",
+      "FadeIn": "0",
+      "Start": "00:03.000",
+      "Duration": "00:01.000"
+    }
+  ],
+  "logoWidth": "196",
+  "bannerPosition": "314:79",
+  "logoOpacity": "100"
+}
