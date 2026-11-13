@@ -248,8 +248,8 @@ function Test-ConcatenateAndOverlay ($outputDir, $profile) {
         $expectedDuration += $range.EndSeconds - $range.StartSeconds
     }
 
-    $graphParts.Add("$($videoLabels -join '')concat=n=$count:v=1:a=0[basev]")
-    $graphParts.Add("$($audioLabels -join '')concat=n=$count:v=0:a=1[basea]")
+    $graphParts.Add("$($videoLabels -join '')concat=n=${count}:v=1:a=0[basev]")
+    $graphParts.Add("$($audioLabels -join '')concat=n=${count}:v=0:a=1[basea]")
     $logoPath = Read-Host "Optional PNG/JPG logo path (Enter to use a test drawbox overlay)"
     if (-not [string]::IsNullOrWhiteSpace($logoPath)) {
         $logoPath = $logoPath.Trim('"').Trim("'").Trim()
