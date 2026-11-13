@@ -64,30 +64,161 @@ $defaultPreviewTime    = "00:00:05.000"
 
 function Convert-TimeToSeconds ($timeStr) {
     if ([string]::IsNullOrWhiteSpace($timeStr)) { return 0.0 }
-    if ($timeStr -match '^\d+(\.\d+)?$') { return [double]$timeStr }
+    $culture = [System.Globalization.CultureInfo]::InvariantCulture
+    if ($timeStr -match '^\d+(\.\d+)?$') { return [double]::Parse($timeStr, $culture) }
     
     try {
         # Αν η συμβολοσειρά είναι της μορφής mm:ss.fff ή hh:mm:ss.fff
         $parts = $timeStr.Split(':')
         if ($parts.Length -eq 2) {
             # Μορφή mm:ss.fff
-            $m = [double]$parts[0]
-            $s = [double]$parts[1]
+            $m = [double]::Parse($parts[0], $culture)
+            $s = [double]::Parse($parts[1], $culture)
             return ($m * 60) + $s
         }
         elseif ($parts.Length -eq 3) {
             # Μορφή hh:mm:ss.fff
-            $h = [double]$parts[0]
-            $m = [double]$parts[1]
-            $s = [double]$parts[2]
+            $h = [double]::Parse($parts[0], $culture)
+            $m = [double]::Parse($parts[1], $culture)
+            $s = [double]::Parse($parts[2], $culture)
             return ($h * 3600) + ($m * 60) + $s
         }
         
         # Εναλλακτική προσπάθεια με TimeSpan αν αποτύχουν τα παραπάνω
-        $ts = [TimeSpan]::Parse($timeStr)
+        $ts = [TimeSpan]::Parse($timeStr, $culture)
         return $ts.TotalSeconds
     } catch {
         return 0.0
+    }
+}
+
+function Get-VideoEncodingOptions {
+    $encoderOutput = & "$script:ffmpegPath" -hide_banner -encoders 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Δεν ήταν δυνατή η ανάγνωση των διαθέσιμων encoders από το FFmpeg."
+    }
+
+    $availableEncoders = @{}
+    foreach ($line in $encoderOutput) {
+        if ("$line" -match '^\s*V\S{5}\s+(\S+)') {
+            $availableEncoders[$matches[1]] = $true
+        }
+    }
+
+    $softwareProfiles = @(
+        @{ Encoder = "libx264"; Label = "H.264 / libx264 (ευρεία συμβατότητα)"; Preset = "fast"; Quality = "23"; QualityOption = "-crf"; Default = $true },
+        @{ Encoder = "libx265"; Label = "H.265 / libx265 (μικρότερα αρχεία, πιο αργή κωδικοποίηση)"; Preset = "fast"; Quality = "28"; QualityOption = "-crf"; Default = $false }
+    )
+    $gpuProfiles = @(
+        @{ Encoder = "h264_nvenc"; Label = "H.264 / NVIDIA NVENC"; Preset = "p4"; Quality = "23"; QualityOption = "-cq"; Default = $true },
+        @{ Encoder = "hevc_nvenc"; Label = "H.265 / NVIDIA NVENC"; Preset = "p4"; Quality = "28"; QualityOption = "-cq"; Default = $false },
+        @{ Encoder = "h264_qsv"; Label = "H.264 / Intel Quick Sync"; Preset = "medium"; Quality = "23"; QualityOption = "-global_quality"; Default = $false },
+        @{ Encoder = "hevc_qsv"; Label = "H.265 / Intel Quick Sync"; Preset = "medium"; Quality = "28"; QualityOption = "-global_quality"; Default = $false },
+        @{ Encoder = "h264_amf"; Label = "H.264 / AMD AMF"; Preset = "balanced"; Quality = "23"; QualityOption = "-qp_p"; Default = $false },
+        @{ Encoder = "hevc_amf"; Label = "H.265 / AMD AMF"; Preset = "balanced"; Quality = "28"; QualityOption = "-qp_p"; Default = $false }
+    )
+
+    $useGpu = Read-Host "Επιτάχυνση κωδικοποίησης μέσω GPU; (Y/N, προεπιλογή N)"
+    $useGpu = $useGpu -match '^[YyΝν]$'
+    $profiles = if ($useGpu) { $gpuProfiles } else { $softwareProfiles }
+    $profiles = @($profiles | Where-Object { $availableEncoders.ContainsKey($_.Encoder) })
+
+    if ($profiles.Count -eq 0) {
+        $kind = if ($useGpu) { "GPU" } else { "software" }
+        throw "Δεν βρέθηκε διαθέσιμος encoder $kind συμβατός με τις επιλογές του script."
+    }
+    if (-not ($profiles | Where-Object { $_.Default })) { $profiles[0].Default = $true }
+
+    $encoderKind = if ($useGpu) { "GPU" } else { "software" }
+    Write-Host "`nΔιαθέσιμοι encoders ${encoderKind}:" -ForegroundColor Cyan
+    for ($i = 0; $i -lt $profiles.Count; $i++) {
+        $defaultText = if ($profiles[$i].Default) { " [ΠΡΟΕΠΙΛΟΓΗ]" } else { "" }
+        Write-Host (" {0}. {1} — preset {2}, {3} {4}{5}" -f ($i + 1), $profiles[$i].Label, $profiles[$i].Preset, $profiles[$i].QualityOption, $profiles[$i].Quality, $defaultText)
+    }
+
+    $profileIndex = 0
+    if ($profiles.Count -gt 1) {
+        while ($true) {
+            $selection = Read-Host "Επιλέξτε encoder (Enter για προεπιλογή)"
+            if ([string]::IsNullOrWhiteSpace($selection)) { break }
+            if ($selection -match '^\d+$' -and [int]$selection -ge 1 -and [int]$selection -le $profiles.Count) {
+                $profileIndex = [int]$selection - 1
+                break
+            }
+            Write-Host "Μη έγκυρη επιλογή." -ForegroundColor Red
+        }
+    }
+
+    $profile = $profiles[$profileIndex]
+    $encodingArgs = @("-c:v", $profile.Encoder)
+    if ($profile.QualityOption -eq "-crf") {
+        $presetOptions = @("ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow", "placebo")
+        Write-Host "`nPresets: $($presetOptions -join ', ') (προεπιλογή: $($profile.Preset))" -ForegroundColor Gray
+        $preset = Read-Host "Preset (Enter για $($profile.Preset))"
+        if ([string]::IsNullOrWhiteSpace($preset)) { $preset = $profile.Preset }
+        if ($preset -notin $presetOptions) { throw "Μη έγκυρο preset: $preset" }
+
+        $quality = Read-Host "CRF 0-51 (Enter για $($profile.Quality))"
+        if ([string]::IsNullOrWhiteSpace($quality)) { $quality = $profile.Quality }
+        if ($quality -notmatch '^\d+$' -or [int]$quality -lt 0 -or [int]$quality -gt 51) {
+            throw "Το CRF πρέπει να είναι ακέραιος από 0 έως 51."
+        }
+        $encodingArgs += @("-preset", $preset, "-crf", $quality)
+    } else {
+        if ($profile.Encoder -match '_nvenc$') {
+            $presetOptions = @("p1", "p2", "p3", "p4", "p5", "p6", "p7")
+        } elseif ($profile.Encoder -match '_qsv$') {
+            $presetOptions = @("veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow")
+        } else {
+            $presetOptions = @("speed", "balanced", "quality")
+        }
+        Write-Host "`nPresets/quality modes: $($presetOptions -join ', ') (προεπιλογή: $($profile.Preset))" -ForegroundColor Gray
+        $preset = Read-Host "Preset/quality mode (Enter για $($profile.Preset))"
+        if ([string]::IsNullOrWhiteSpace($preset)) { $preset = $profile.Preset }
+        if ($preset -notin $presetOptions) { throw "Μη έγκυρο preset/quality mode: $preset" }
+
+        $quality = Read-Host "Τιμή ποιότητας 0-51 (Enter για $($profile.Quality))"
+        if ([string]::IsNullOrWhiteSpace($quality)) { $quality = $profile.Quality }
+        if ($quality -notmatch '^\d+$' -or [int]$quality -lt 0 -or [int]$quality -gt 51) {
+            throw "Η τιμή ποιότητας πρέπει να είναι ακέραιος από 0 έως 51."
+        }
+
+        if ($profile.Encoder -match '_nvenc$') {
+            $encodingArgs += @("-preset", $preset, "-rc", "vbr", $profile.QualityOption, $quality, "-b:v", "0")
+        } elseif ($profile.Encoder -match '_qsv$') {
+            $encodingArgs += @("-preset", $preset, $profile.QualityOption, $quality)
+        } else {
+            $encodingArgs += @("-quality", $preset, "-qp_i", $quality, $profile.QualityOption, $quality)
+        }
+    }
+
+    if ($useGpu) {
+        $testArgs = @("-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=128x128:r=1", "-frames:v", "1") + $encodingArgs + @("-f", "null", "-")
+        & "$script:ffmpegPath" @testArgs
+        if ($LASTEXITCODE -ne 0) {
+            throw "Ο encoder $($profile.Encoder) δεν μπόρεσε να αρχικοποιηθεί. Ελέγξτε την υποστήριξη GPU/driver και δοκιμάστε ξανά."
+        }
+    }
+
+    Write-Host "Επιλεγμένος encoder: $($profile.Encoder)" -ForegroundColor Green
+    return ,$encodingArgs
+}
+
+function Read-CutRange {
+    while ($true) {
+        $startTime = Read-Host "Χρόνος τέλους διαφημίσεων αρχής (δηλαδή 00:02.635)"
+        $endTime = Read-Host "Χρόνος έναρξης διαφημίσεων τέλους (δηλαδή 00:30:39.634)"
+        $timePattern = '^(?:\d+(?:\.\d+)?|\d+:\d+(?:\.\d+)?|\d+:\d+:\d+(?:\.\d+)?)$'
+        if ($startTime -notmatch $timePattern -or $endTime -notmatch $timePattern) {
+            Write-Host "Χρησιμοποιήστε δευτερόλεπτα, mm:ss ή hh:mm:ss." -ForegroundColor Red
+            continue
+        }
+        $startSeconds = Convert-TimeToSeconds $startTime
+        $endSeconds = Convert-TimeToSeconds $endTime
+        if ($startSeconds -ge 0 -and $endSeconds -gt $startSeconds) {
+            return @{ Start = $startTime; End = $endTime; StartSeconds = $startSeconds; EndSeconds = $endSeconds }
+        }
+        Write-Host "Οι χρόνοι δεν είναι έγκυροι ή ο χρόνος τέλους δεν είναι μετά τον χρόνο αρχής." -ForegroundColor Red
     }
 }
 
@@ -557,7 +688,7 @@ function Get-ValidOutputDir ($defaultDir) {
 }
 
 # --- ΑΣΦΑΛΗΣ ΔΙΑΓΡΑΦΗ ΕΝΔΙΑΜΕΣΩΝ ΑΡΧΕΙΩΝ ---
-function Safe-Clear-TempFiles ($fixedFiles, $finalFiles, $mergedFile, $overlayFile, $targetOverlayPath) {
+function Safe-Clear-TempFiles ($fixedFiles, $finalFiles, $mergedFile, $overlayFile, $targetOverlayPath, $additionalTempFiles = $null) {
     Write-Host "`n========================================================" -ForegroundColor Cyan
     Write-Host "           ΕΛΕΓΧΟΣ & ΚΑΘΑΡΙΣΜΟΣ ΠΡΟΣΩΡΙΝΩΝ ΑΡΧΕΙΩΝ        " -ForegroundColor Cyan
     Write-Host "========================================================" -ForegroundColor Cyan
@@ -586,6 +717,16 @@ function Safe-Clear-TempFiles ($fixedFiles, $finalFiles, $mergedFile, $overlayFi
         }
     }
 
+    if ($additionalTempFiles) {
+        foreach ($fn in $additionalTempFiles) {
+            if ($fn -and -not (Test-Path -LiteralPath $fn)) {
+                Write-Host "[ΣΦΑΛΜΑ D-4] ΔΕΝ δημιουργήθηκε το προσωρινό αρχείο:" -ForegroundColor Red
+                Write-Host "             -> $fn" -ForegroundColor Yellow
+                $hasErrors = $true
+            }
+        }
+    }
+
     if ($hasErrors) {
         Write-Host "`n--------------------------------------------------------" -ForegroundColor Red
         Write-Host "[ΠΡΟΣΤΑΣΙΑ ΑΡΧΕΙΩΝ] Λόγω σφάλματος στα επόμενα στάδια, ΔΕΝ ΔΙΑΓΡΑΦΗΚΑΝ:" -ForegroundColor Yellow
@@ -598,6 +739,14 @@ function Safe-Clear-TempFiles ($fixedFiles, $finalFiles, $mergedFile, $overlayFi
             foreach ($fn in $finalFiles) {
                 if (Test-Path -LiteralPath $fn) {
                     Write-Host "  [*] ΔΙΑΤΗΡΕΙΤΑΙ (Final Cut): $fn" -ForegroundColor Green
+                }
+            }
+        }
+
+        if ($additionalTempFiles) {
+            foreach ($fn in $additionalTempFiles) {
+                if (Test-Path -LiteralPath $fn) {
+                    Write-Host "  [*] ΔΙΑΤΗΡΕΙΤΑΙ (Temporary): $fn" -ForegroundColor Green
                 }
             }
         }
@@ -631,6 +780,16 @@ function Safe-Clear-TempFiles ($fixedFiles, $finalFiles, $mergedFile, $overlayFi
                 }
             }
         }
+
+        if ($additionalTempFiles) {
+            foreach ($f in $additionalTempFiles) {
+                if ($f -and (Test-Path -LiteralPath $f)) {
+                    Remove-Item -LiteralPath $f -Force
+                    Write-Host "[ΔΙΑΓΡΑΦΗΚΕ]: $f" -ForegroundColor Gray
+                }
+            }
+        }
+
         if ($mergedFile -and $overlayFile -and (Test-Path -LiteralPath $overlayFile)) {
             if (Test-Path -LiteralPath $mergedFile) {
                 Remove-Item -LiteralPath $mergedFile -Force
@@ -665,10 +824,10 @@ function Repair-Video ($inputFile) {
 }
 
 # 2. Αφαίρεση Διαφημίσεων / Κοπή
-function Cut-Video ($inputFile, $containerExt, $aspectChoice) {
+function Cut-Video ($inputFile, $containerExt, $aspectChoice, $encodingOptions = $null, $crop43 = $false, $cutRange = $null) {
     Write-Host "`n>>> ΣΤΑΔΙΟ: Κοπή & Αφαίρεση Διαφημίσεων" -ForegroundColor Green
-    $startTime = Read-Host "Χρόνος τέλους διαφημίσεων αρχής (δηλαδή 00:02.635)"
-    $endTime = Read-Host "Χρόνος έναρξης διαφημίσεων τέλους (δηλαδή 00:30:39.634)"
+    if (-not $cutRange) { $cutRange = Read-CutRange }
+    if (-not $encodingOptions) { $encodingOptions = Get-VideoEncodingOptions }
     
     if ([string]::IsNullOrWhiteSpace($containerExt)) {
         $containerInput = Read-Host "Επιλογή τύπου αρχείου (mkv ή mp4 - Πατήστε Enter για mkv)"
@@ -688,7 +847,8 @@ function Cut-Video ($inputFile, $containerExt, $aspectChoice) {
 
     Write-Host "`n>>> Εκτέλεση Κοπής..." -ForegroundColor Green
     
-    $ffArgs = @("-y", "-i", $inputFile, "-ss", $startTime, "-to", $endTime, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23") + $aspectParam + @("-c:a", "aac", "-b:a", "192k", $output)
+    $videoFilter = if ($crop43) { @("-vf", "crop=1440:1080:240:0") } else { @() }
+    $ffArgs = @("-y", "-i", $inputFile, "-ss", $cutRange.Start, "-to", $cutRange.End) + $videoFilter + $encodingOptions + $aspectParam + @("-c:a", "aac", "-b:a", "192k", $output)
     & "$script:ffmpegPath" @ffArgs
 
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $output)) {
@@ -704,9 +864,17 @@ function Cut-Video ($inputFile, $containerExt, $aspectChoice) {
 }
 
 # 3. Συνένωση Αρχείων (Concat)
-function Concat-Videos ($fileList, $outputDir, $containerExt) {
+function Concat-Videos ($fileList, $outputDir, $containerExt, $outputName = $null) {
     if ($fileList.Count -lt 2) {
+        if ($fileList.Count -eq 0) { return $null }
         Write-Host "Απαιτούνται τουλάχιστον 2 αρχεία για συνένωση." -ForegroundColor Yellow
+        if ($outputName) {
+            $singleOutput = Join-Path $outputDir $outputName
+            if ([System.IO.Path]::GetFullPath($fileList[0]) -ne [System.IO.Path]::GetFullPath($singleOutput)) {
+                Copy-Item -LiteralPath $fileList[0] -Destination $singleOutput -Force -ErrorAction Stop | Out-Null
+                return $singleOutput
+            }
+        }
         return $fileList[0]
     }
     if ([string]::IsNullOrWhiteSpace($containerExt)) { $containerExt = "mkv" }
@@ -715,7 +883,8 @@ function Concat-Videos ($fileList, $outputDir, $containerExt) {
     $listContent = foreach ($f in $fileList) { "file '$($f -replace "'", "''")'" }
     Set-Content -LiteralPath $listFilePath -Value $listContent -Encoding utf8
 
-    $mergedOutput = Join-Path $outputDir "Merged_Final.$containerExt"
+    $mergedName = if ($outputName) { $outputName } else { "Merged_Final.$containerExt" }
+    $mergedOutput = Join-Path $outputDir $mergedName
     Write-Host "`n>>> ΣΤΑΔΙΟ: Συνένωση αρχείων στο: $mergedOutput" -ForegroundColor Green
     
     $ffArgs = @("-y", "-f", "concat", "-safe", "0", "-i", $listFilePath, "-c", "copy", $mergedOutput)
@@ -737,8 +906,11 @@ function Concat-Videos ($fileList, $outputDir, $containerExt) {
 
 # 4. Επικάλυψη Logo & Banner (Με Δυναμική Υποστήριξη Διαφορετικού Logo ανά Διάστημα)
 # 4. Επικάλυψη Logo & Banner (Οριστική Διόρθωση με Case-Insensitive Dictionary)
-function Apply-OverlayBanner ($inputFile, $outputDir) {
+function Apply-OverlayBanner ($inputFile, $outputDir, $encodingOptions = $null, $segments = $null) {
     Write-Host "`n>>> ΣΤΑΔΙΟ: Επικάλυψη Logo & Banner" -ForegroundColor Green
+    if (-not $encodingOptions) { $encodingOptions = Get-VideoEncodingOptions }
+    $segmentBatch = $segments -and $segments.Count -gt 0
+    if ($segmentBatch) { $inputFile = $segments[0].File }
     Write-Host "`n-- Επιλογή τύπου επικάλυψης --" -ForegroundColor Yellow
     Write-Host " 1. Μόνο Logo (Εφαρμογή των προγραμματισμένων schedules)"
     Write-Host " 2. Logo Schedules + Banner Τίτλου (Λευκό πλαίσιο με κείμενα)"
@@ -747,6 +919,33 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
     if ([string]::IsNullOrWhiteSpace($outputDir)) { $outputDir = Split-Path $inputFile -Parent }
     $output = Join-Path $outputDir "Merged_Final_noSign.mkv"
     $previewImage = Join-Path $outputDir "preview.jpg"
+    $sourceInputArgs = [System.Collections.Generic.List[string]]::new()
+    $sourceFilterParts = [System.Collections.Generic.List[string]]::new()
+    $sourceCount = if ($segmentBatch) { $segments.Count } else { 1 }
+    $sourceFilter = ""
+    if ($segmentBatch) {
+        $videoLabels = [System.Collections.Generic.List[string]]::new()
+        $audioLabels = [System.Collections.Generic.List[string]]::new()
+        for ($i = 0; $i -lt $segments.Count; $i++) {
+            $segment = $segments[$i]
+            $sourceInputArgs.Add("-i")
+            $sourceInputArgs.Add($segment.File)
+            $start = ([double]$segment.StartSeconds).ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+            $end = ([double]$segment.EndSeconds).ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+            $videoLabel = "trimmed_v$i"
+            $audioLabel = "trimmed_a$i"
+            $sourceFilterParts.Add("[${i}:v]trim=start=${start}:end=${end},setpts=PTS-STARTPTS[$videoLabel]")
+            $sourceFilterParts.Add("[${i}:a]atrim=start=${start}:end=${end},asetpts=PTS-STARTPTS[$audioLabel]")
+            $videoLabels.Add("[$videoLabel]")
+            $audioLabels.Add("[$audioLabel]")
+        }
+        $sourceFilterParts.Add("$($videoLabels -join '')concat=n=$($segments.Count):v=1:a=0[basev]")
+        $sourceFilterParts.Add("$($audioLabels -join '')concat=n=$($segments.Count):v=0:a=1[basea]")
+        $sourceFilter = $sourceFilterParts -join ";"
+    } else {
+        $sourceInputArgs.Add("-i")
+        $sourceInputArgs.Add($inputFile)
+    }
 
     $seasonText = " "
     $epTitle = " "
@@ -787,6 +986,15 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
         $fadeOutSec = Convert-TimeToSeconds $script:logoFadeOut
 		
 		$previewSec = Convert-TimeToSeconds $script:previewTime
+        if ($segmentBatch) {
+            $totalDuration = 0.0
+            foreach ($segment in $segments) {
+                $totalDuration += [double]$segment.EndSeconds - [double]$segment.StartSeconds
+            }
+            if ($totalDuration -gt 0 -and $previewSec -ge $totalDuration) {
+                $previewSec = [math]::Max(0, $totalDuration - 0.1)
+            }
+        }
 
         $posCoords = $script:logoPosition.Split(':')
         $logoX = $posCoords[0]
@@ -812,18 +1020,22 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
         $logoInputArgs = [System.Collections.Generic.List[string]]::new()
         $filterParts = [System.Collections.Generic.List[string]]::new()
         $finalFilterParts = [System.Collections.Generic.List[string]]::new()
-        $currentVideoInput = "0:v"
+        $previewCurrentVideoInput = "0:v"
+        $currentVideoInput = if ($segmentBatch) { "basev" } else { "0:v" }
         
         $schedCount = $validSchedules.Count
 
         # Χρήση Case-Insensitive Dictionary για απόλυτη ασφάλεια στις διαδρομές αρχείων
         $fileToIndex = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
-        $inputIdx = 1
+        $previewFileToIndex = [System.Collections.Generic.Dictionary[string, int]]::new([StringComparer]::OrdinalIgnoreCase)
+        $inputIdx = $sourceCount
+        $previewInputIdx = 1
 
         foreach ($sched in $validSchedules) {
             $resolvedPath = (Get-Item -LiteralPath $sched.File).FullName
             if (-not $fileToIndex.ContainsKey($resolvedPath)) {
                 $fileToIndex[$resolvedPath] = $inputIdx
+                $previewFileToIndex[$resolvedPath] = $previewInputIdx
 
                 $isImg = $resolvedPath -match '\.(jpg|jpeg|png)$'
                 if ($isImg) {
@@ -837,6 +1049,7 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
                 $logoInputArgs.Add($resolvedPath)
 
                 $inputIdx++
+                $previewInputIdx++
             }
         }
 
@@ -845,6 +1058,7 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
             $resolvedPath = (Get-Item -LiteralPath $sched.File).FullName
             
             $fileIdx = [int]$fileToIndex[$resolvedPath]
+            $previewFileIdx = [int]$previewFileToIndex[$resolvedPath]
 
             # --- ΕΛΕΓΧΟΣ DEBUGGING ---
             Write-Host "DEBUG -> Index: $i | File: $resolvedPath | Resolved Index: $fileIdx" -ForegroundColor Magenta
@@ -892,11 +1106,12 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
 				$nextVideoInput = "v_logo_$i"
 			}
 
-            $filterPart = "[${fileIdx}:v]scale=${lWidth}:-1,format=yuva420p,colorchannelmixer=aa=$logoAlpha${fadeFilter}[$pipName];[$currentVideoInput][$pipName]overlay=x=$logoX`:y=$logoY`:enable='$enableExpr':shortest=1[$nextVideoInput]"
+            $filterPart = "[${previewFileIdx}:v]scale=${lWidth}:-1,format=yuva420p,colorchannelmixer=aa=$logoAlpha${fadeFilter}[$pipName];[$previewCurrentVideoInput][$pipName]overlay=x=$logoX`:y=$logoY`:enable='$enableExpr':shortest=1[$nextVideoInput]"
             $finalFilterPart = "[${fileIdx}:v]scale=${lWidth}:-1,format=yuva420p,colorchannelmixer=aa=$logoAlpha${finalFadeFilter}[$pipName];[$currentVideoInput][$pipName]overlay=x=$logoX`:y=$logoY`:enable='$enableExpr':shortest=1[$nextVideoInput]"
             $filterParts.Add($filterPart)
             $finalFilterParts.Add($finalFilterPart)
 
+            $previewCurrentVideoInput = $nextVideoInput
 			$currentVideoInput = $nextVideoInput
         }
 		
@@ -909,7 +1124,7 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
             $filterParts.Add("[box]drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':text='$seasonText':x=$textX`:y=$textY1`:fontsize=$fontSize1`:fontcolor=black[tb1]")
             $filterParts.Add("[tb1]drawtext=fontfile='C\:/Windows/Fonts/arialbd.ttf':textfile='$escapedEpPath':x=$textX`:y=$textY2`:fontsize=$fontSize2`:fontcolor=black[tb2]")
             $filterParts.Add("[tb2]format=yuva420p,fade=t=out:st=$fadeOutSec`:d=1:alpha=1[banner]")
-            $filterParts.Add("[$currentVideoInput][banner]overlay=x=$bannerX`:y=$bannerY`:shortest=1[$bannerFinalInput]")
+            $filterParts.Add("[$previewCurrentVideoInput][banner]overlay=x=$bannerX`:y=$bannerY`:shortest=1[$bannerFinalInput]")
             $finalFilterParts.Add("[tb2]format=yuva420p,fade=t=out:st=$fadeOutSec`:d=1:alpha=1[banner]")
             $finalFilterParts.Add("[$currentVideoInput][banner]overlay=x=$bannerX`:y=$bannerY`:shortest=1[$bannerFinalInput]")
         }
@@ -929,10 +1144,36 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
 		# 1. Βήμα 1: Αστραπιαία εξαγωγή του καθαρού καρέ βίντεο με Fast Seek
 		Write-Host "`n>>> Δημιουργία καθαρού καρέ προεπισκόπησης (Fast Seek στο $script:previewTime)..." -ForegroundColor Cyan
 
+        $previewSource = $inputFile
+        $previewSeek = $script:previewTime
+        if ($segmentBatch) {
+            $timelineOffset = 0.0
+            $previewFound = $false
+            foreach ($segment in $segments) {
+                $segmentDuration = [double]$segment.EndSeconds - [double]$segment.StartSeconds
+                if ($previewSec -lt ($timelineOffset + $segmentDuration)) {
+                    $previewSource = $segment.File
+                    $localPreviewTime = [math]::Max(0, $previewSec - $timelineOffset)
+                    $sourcePreviewTime = [double]$segment.StartSeconds + $localPreviewTime
+                    $previewSeek = $sourcePreviewTime.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+                    $previewFound = $true
+                    break
+                }
+                $timelineOffset += $segmentDuration
+            }
+            if (-not $previewFound) {
+                $lastSegment = $segments[$segments.Count - 1]
+                $previewSource = $lastSegment.File
+                $lastDuration = [double]$lastSegment.EndSeconds - [double]$lastSegment.StartSeconds
+                $sourcePreviewTime = [double]$lastSegment.StartSeconds + [math]::Max(0, $lastDuration - 0.1)
+                $previewSeek = $sourcePreviewTime.ToString("0.###", [System.Globalization.CultureInfo]::InvariantCulture)
+            }
+        }
+
 		$rawPreviewArgs = @(
 			"-hide_banner", "-loglevel", "error", "-y",
-			"-ss", $script:previewTime,
-			"-i", $inputFile,
+			"-ss", $previewSeek,
+			"-i", $previewSource,
 			"-vframes", "1",
 			"-q:v", "2",
 			$previewImage
@@ -1049,7 +1290,12 @@ function Apply-OverlayBanner ($inputFile, $outputDir) {
     $filter = $filter -replace 'between[(]t [+] [^,]+,', 'between(t,'
     # ------------------------------------------
 
-    $ffArgs = @("-y", "-i", $inputFile) + @($logoInputArgs) + @("-filter_complex", $filter, "-map", "[final]", "-map", "0:a", "-c:a", "copy", $output)
+    if ($segmentBatch) {
+        $filter = "$sourceFilter;$filter"
+        $ffArgs = @("-y") + @($sourceInputArgs) + @($logoInputArgs) + @("-filter_complex", $filter, "-map", "[final]", "-map", "[basea]") + $encodingOptions + @("-c:a", "aac", "-b:a", "192k", $output)
+    } else {
+        $ffArgs = @("-y") + @($sourceInputArgs) + @($logoInputArgs) + @("-filter_complex", $filter, "-map", "[final]", "-map", "0:a") + $encodingOptions + @("-c:a", "copy", $output)
+    }
     & "$script:ffmpegPath" @ffArgs
 
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $output)) {
@@ -1106,12 +1352,13 @@ function Apply-AudioBooster ($inputFile, $outputDir) {
 }
 
 # 6. Μετατροπή Crop 16:9 σε 4:3 (Περικοπή μαύρων μπαρών)
-function Convert-Crop43 ($inputFile, $outputDir) {
+function Convert-Crop43 ($inputFile, $outputDir, $encodingOptions = $null) {
     if ([string]::IsNullOrWhiteSpace($outputDir)) { $outputDir = Split-Path $inputFile -Parent }
+    if (-not $encodingOptions) { $encodingOptions = Get-VideoEncodingOptions }
     $output = Join-Path $outputDir "Output_43_Cleaned.mkv"
     Write-Host "`n>>> ΣΤΑΔΙO: Μετατροπή Aspect Ratio (Crop 1440x1080 σε 4:3) στο: $output" -ForegroundColor Green
     
-    $ffArgs = @("-y", "-i", $inputFile, "-vf", "crop=1440:1080:240:0", "-c:v", "libx264", "-crf", "18", "-preset", "fast", "-c:a", "copy", $output)
+    $ffArgs = @("-y", "-i", $inputFile, "-vf", "crop=1440:1080:240:0") + $encodingOptions + @("-c:a", "copy", $output)
     & "$script:ffmpegPath" @ffArgs
 
     if ($LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $output)) {
@@ -1158,9 +1405,9 @@ while ($true) {
     Write-Host ""
     Write-Host " -- ΣΥΝΔΥΑΣΤΙΚΕΣ ΛΕΙΤΟΥΡΓΙΕΣ (Προεπιλογές: Φορμά .mkv, Αρχική Αναλογία) --" -ForegroundColor Yellow
     Write-Host " 7. Pipeline 1: [Επιδιόρθωση -> Κοπή -> Συνένωση]"
-    Write-Host " 8. Pipeline 2: [Επιδιόρθωση -> Κοπή -> Συνένωση -> Τελικό Crop 16:9 σε 4:3]"
-    Write-Host " 9. Full TV Pipeline: [Επιδιόρθωση -> Κοπή -> Συνένωση -> Logo/Banner Overlay]"
-    Write-Host " 10. Full TV Pipeline + Audio: [Επιδιόρθωση -> Κοπή -> Συνένωση -> Logo/Banner Overlay -> Audio Boost]"
+    Write-Host " 8. Pipeline 2: [Επιδιόρθωση -> Κοπή + Crop 4:3 -> Συνένωση (μία κωδικοποίηση)]"
+    Write-Host " 9. Full TV Pipeline: [Επιδιόρθωση -> Κοπή + Συνένωση + Overlay (μία κωδικοποίηση)]"
+    Write-Host " 10. Full TV Pipeline + Audio: [Pipeline 9 -> Audio Boost (χωρίς νέα κωδικοποίηση βίντεο)]"
     Write-Host ""
     Write-Host " Q. Έξοδος" -ForegroundColor Red
     Write-Host "========================================================" -ForegroundColor Cyan
@@ -1239,6 +1486,7 @@ while ($true) {
             
             if ($files.Count -gt 0) {
                 $outDir = Get-ValidOutputDir (Split-Path $files[0] -Parent)
+                $encodingOptions = Get-VideoEncodingOptions
                 $fixedFiles = [System.Collections.Generic.List[string]]::new()
                 $finalFiles = [System.Collections.Generic.List[string]]::new()
 
@@ -1246,7 +1494,7 @@ while ($true) {
                     $repaired = Repair-Video $f
                     if ($repaired) {
                         $fixedFiles.Add($repaired)
-                        $cut = Cut-Video $repaired "mkv" "1"
+                        $cut = Cut-Video $repaired "mkv" "1" $encodingOptions
                         if ($cut) { $finalFiles.Add($cut) }
                     }
                 }
@@ -1270,6 +1518,7 @@ while ($true) {
 
             if ($files.Count -gt 0) {
                 $outDir = Get-ValidOutputDir (Split-Path $files[0] -Parent)
+                $encodingOptions = Get-VideoEncodingOptions
                 $fixedFiles = [System.Collections.Generic.List[string]]::new()
                 $finalFiles = [System.Collections.Generic.List[string]]::new()
 
@@ -1277,17 +1526,14 @@ while ($true) {
                     $repaired = Repair-Video $f
                     if ($repaired) {
                         $fixedFiles.Add($repaired)
-                        $cut = Cut-Video $repaired "mkv" "1"
+                        $cut = Cut-Video $repaired "mkv" "1" $encodingOptions $true
                         if ($cut) { $finalFiles.Add($cut) }
                     }
                 }
                 
                 $merged = $null
                 if ($finalFiles.Count -gt 0) {
-                    $merged = Concat-Videos $finalFiles $outDir "mkv"
-                    if ($merged) {
-                        Convert-Crop43 $merged $outDir
-                    }
+                    $merged = Concat-Videos $finalFiles $outDir "mkv" "Output_43_Cleaned.mkv"
                 }
                 
                 Safe-Clear-TempFiles $fixedFiles $finalFiles $merged $null $null
@@ -1304,30 +1550,31 @@ while ($true) {
 
             if ($files.Count -gt 0) {
                 $outDir = Get-ValidOutputDir (Split-Path $files[0] -Parent)
+                $encodingOptions = Get-VideoEncodingOptions
                 $fixedFiles = [System.Collections.Generic.List[string]]::new()
-                $finalFiles = [System.Collections.Generic.List[string]]::new()
+                $segments = [System.Collections.Generic.List[object]]::new()
 
                 foreach ($f in $files) {
                     $repaired = Repair-Video $f
                     if ($repaired) {
                         $fixedFiles.Add($repaired)
-                        $cut = Cut-Video $repaired "mkv" "1"
-                        if ($cut) { $finalFiles.Add($cut) }
+                        $cutRange = Read-CutRange
+                        $segments.Add(@{
+                            File = $repaired
+                            StartSeconds = $cutRange.StartSeconds
+                            EndSeconds = $cutRange.EndSeconds
+                        })
                     }
                 }
 
-                $merged = $null
                 $overlayed = $null
                 $targetOverlayPath = Join-Path $outDir "Merged_Final_noSign.mkv"
 
-                if ($finalFiles.Count -gt 0) {
-                    $merged = Concat-Videos $finalFiles $outDir "mkv"
-                    if ($merged) {
-                        $overlayed = Apply-OverlayBanner $merged $outDir
-                    }
+                if ($segments.Count -gt 0) {
+                    $overlayed = Apply-OverlayBanner $null $outDir $encodingOptions $segments
                 }
 
-                Safe-Clear-TempFiles $fixedFiles $finalFiles $merged $overlayed $targetOverlayPath
+                Safe-Clear-TempFiles $fixedFiles $null $null $overlayed $targetOverlayPath
             }
             Read-Host "`nΠιέστε Enter για να επιστρέψετε στο μενού..."
         }
@@ -1342,33 +1589,36 @@ while ($true) {
 
                 if ($files.Count -gt 0) {
                     $outDir = Get-ValidOutputDir (Split-Path $files[0] -Parent)
+                    $encodingOptions = Get-VideoEncodingOptions
                     $fixedFiles = [System.Collections.Generic.List[string]]::new()
-                    $finalFiles = [System.Collections.Generic.List[string]]::new()
+                    $segments = [System.Collections.Generic.List[object]]::new()
 
                     foreach ($f in $files) {
                         $repaired = Repair-Video $f
                         if ($repaired) {
                             $fixedFiles.Add($repaired)
-                            $cut = Cut-Video $repaired "mkv" "1"
-                            if ($cut) { $finalFiles.Add($cut) }
+                            $cutRange = Read-CutRange
+                            $segments.Add(@{
+                                File = $repaired
+                                StartSeconds = $cutRange.StartSeconds
+                                EndSeconds = $cutRange.EndSeconds
+                            })
                         }
                     }
 
-                    $merged = $null
                     $overlayed = $null
                     $targetOverlayPath = Join-Path $outDir "Merged_Final_noSign.mkv"
+                    $audioOutput = $null
 
-                    if ($finalFiles.Count -gt 0) {
-                        $merged = Concat-Videos $finalFiles $outDir "mkv"
-                        if ($merged) {
-                            $overlayed = Apply-OverlayBanner $merged $outDir
-                            if ($overlayed) {
-                                Apply-AudioBooster $overlayed $outDir
-                            }
+                    if ($segments.Count -gt 0) {
+                        $overlayed = Apply-OverlayBanner $null $outDir $encodingOptions $segments
+                        if ($overlayed) {
+                            $audioOutput = Apply-AudioBooster $overlayed $outDir
                         }
                     }
 
-                    Safe-Clear-TempFiles $fixedFiles $finalFiles $merged $overlayed $targetOverlayPath
+                    $additionalTempFiles = if ($audioOutput) { @($overlayed) } else { $null }
+                    Safe-Clear-TempFiles $fixedFiles $null $null $overlayed $targetOverlayPath $additionalTempFiles
                 }
                 Read-Host "`nΠιέστε Enter για να επιστρέψετε στο μενού..."
             } else {
